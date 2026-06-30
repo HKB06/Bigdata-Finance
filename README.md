@@ -25,7 +25,8 @@ eJustice dans **HDFS**.
             │     Airflow DAGs          │  delta detection   │ mise a jour
             │  ingestion_bronze         ├────────────────────┘
             │   - ingest_nbb (CSV+PDF)  │
-            │   - ingest_ejustice (PDF) │
+            │   - ingest_ejustice (PDF) │ ── via Tor (tor1/2/3, rotation IP)
+            │   - ingest_stapor (JSON)  │ ── via cookie Playwright (notaire)
             └────────────┬─────────────┘
                          │ ecrit les fichiers bruts
                          v
@@ -33,6 +34,26 @@ eJustice dans **HDFS**.
                  │   HDFS Bronze  │   /data/raw/{source}/{bce}/{type}/...
                  └────────────────┘
 ```
+
+### Rotation Tor (anti-blocage)
+
+Les sources publiques limitent les requêtes par IP. Le scraping NBB et eJustice
+est donc routé à travers trois proxies Tor (`tor1`, `tor2`, `tor3`) en
+**round-robin**, avec possibilité de renouveler le circuit (NEWNYM → nouvelle
+IP de sortie). Voir `include/http_client.py`. La rotation se vérifie ainsi :
+
+```bash
+docker compose exec airflow-scheduler python -c \
+  "from include import http_client; print(http_client.public_ip(use_tor=True))"
+```
+
+### Source stapor / notaire (cookie anti-bot)
+
+`statuts.notaire.be` est protégé par un challenge JavaScript. Le cookie est
+obtenu via **Playwright (Chromium)** puis mis en cache dans HDFS pour être
+partagé entre les tâches Airflow (voir `include/notaire_cookie.py`). Un cookie
+peut aussi être fourni directement via la variable `COOKIE_NOTAIRE`. Comme le
+cookie est lié à l'IP, les appels stapor partent en **direct** (sans Tor).
 
 ### Le rôle de la State DB (delta detection)
 
@@ -55,23 +76,26 @@ Clé déterministe d'un fichier : `bce | source | deposit_id | doc_type | year`.
 ├── .env.example              # variables d'environnement
 ├── dags/
 │   ├── seed_companies_mongo.py  # init : peuple MongoDB + State DB
-│   └── ingestion_bronze.py      # ingestion NBB/CBSO + eJustice -> HDFS
+│   └── ingestion_bronze.py      # ingestion NBB + eJustice + stapor -> HDFS
 ├── include/
 │   ├── config.py             # configuration centrale
 │   ├── mongo_utils.py        # referentiel + State DB (delta detection)
 │   ├── hdfs_utils.py         # client WebHDFS + ecriture Bronze
+│   ├── http_client.py        # GET avec rotation Tor (round-robin + NEWNYM)
+│   ├── notaire_cookie.py     # cookie stapor via Playwright + cache HDFS
 │   ├── seed.py               # chargement des entreprises dans MongoDB
-│   └── sources.py            # ingestion NBB/CBSO et eJustice
+│   └── sources.py            # ingestion NBB / eJustice / stapor
 └── data/                     # enterprise.csv (non versionne)
 ```
 
 ## Sources de données
 
-| Source       | Contenu                              | Format        |
-|--------------|--------------------------------------|---------------|
-| KBO Open Data| référentiel des entreprises belges   | CSV → MongoDB |
-| NBB / CBSO   | comptes annuels (consult.cbso.nbb.be)| CSV + PDF     |
-| eJustice     | publications du Moniteur belge       | PDF           |
+| Source       | Contenu                              | Format         | Accès        |
+|--------------|--------------------------------------|----------------|--------------|
+| KBO Open Data| référentiel des entreprises belges   | CSV → MongoDB  | local        |
+| NBB / CBSO   | comptes annuels (consult.cbso.nbb.be)| CSV + PDF      | via Tor      |
+| eJustice     | publications du Moniteur belge       | PDF            | via Tor      |
+| stapor       | statuts notariés (statuts.notaire.be)| JSON (+ PDF)   | cookie direct|
 
 ## Démarrage rapide
 
@@ -89,6 +113,7 @@ Services exposés :
 | Airflow        | http://localhost:8080   | airflow / airflow|
 | HDFS NameNode  | http://localhost:9870   | —                |
 | Mongo Express  | http://localhost:8081   | —                |
+| Tor (SOCKS5)   | localhost:9050/9052/9054| —                |
 
 ### 2. (Optionnel) Charger l'Open Data BCE
 

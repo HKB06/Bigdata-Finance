@@ -13,16 +13,17 @@ Chaque telechargement suit le meme cycle :
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any, Optional
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
 
 from . import config
 from . import hdfs_utils
+from . import http_client
 from . import mongo_utils
 
 # --- Endpoints --------------------------------------------------------------
@@ -32,17 +33,16 @@ CBSO_BROKER = "https://consult.cbso.nbb.be/api/external/broker/public/deposits"
 EJUSTICE_ROOT = "https://www.ejustice.just.fgov.be"
 EJUSTICE_LIST = f"{EJUSTICE_ROOT}/cgi_tsv/list.pl"
 
+NOTAIRE_API = "https://statuts.notaire.be/stapor_v1/api/enterprises/{num}/statutes"
+
 
 def normalize_bce(value: str) -> str:
     return re.sub(r"\D", "", value or "").zfill(10)
 
 
-def _get(url: str, **kwargs) -> requests.Response:
-    kwargs.setdefault("headers", config.HTTP_HEADERS)
-    kwargs.setdefault("timeout", config.HTTP_TIMEOUT)
-    response = requests.get(url, **kwargs)
-    response.raise_for_status()
-    return response
+def _get(url: str, *, use_tor: Optional[bool] = None, **kwargs):
+    """GET via http_client (rotation Tor selon la configuration)."""
+    return http_client.get(url, use_tor=use_tor, **kwargs)
 
 
 def _download_to_bronze(
@@ -55,6 +55,7 @@ def _download_to_bronze(
     year: Optional[int] = None,
     deposit_id: Optional[str] = None,
     headers: Optional[dict] = None,
+    use_tor: Optional[bool] = None,
 ) -> str:
     """Telecharge un fichier en respectant la State DB (delta detection).
 
@@ -73,7 +74,7 @@ def _download_to_bronze(
     )
 
     try:
-        response = _get(url, headers=headers or config.HTTP_HEADERS)
+        response = _get(url, headers=headers or config.HTTP_HEADERS, use_tor=use_tor)
         content = response.content
         if not content:
             mongo_utils.mark_error(key, "reponse vide")
@@ -242,4 +243,105 @@ def ingest_ejustice(bce: str, max_pages: int = 20) -> dict[str, int]:
         time.sleep(0.3)
 
     print(f"[eJustice] {bce} -> {stats}")
+    return stats
+
+
+# ==========================================================================
+# stapor / notaire : statuts notaries (JSON + PDF)
+# ==========================================================================
+# Le cookie anti-bot est lie a l'IP qui l'a obtenu : les appels stapor partent
+# donc en direct (use_tor=False) et non via Tor.
+def fetch_statutes(bce: str, cookie: str, limit: int = 20, max_pages: int = 50) -> list[dict]:
+    """Recupere la liste paginee des statuts d'une entreprise."""
+    numero = normalize_bce(bce)
+    url = NOTAIRE_API.format(num=numero)
+    headers = {
+        **config.HTTP_HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"https://statuts.notaire.be/stapor_v1/enterprise/{numero}/statutes",
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": cookie,
+    }
+    items: list[dict] = []
+    offset = 0
+    total: Optional[int] = None
+    for _ in range(max_pages):
+        response = _get(
+            url, headers=headers, use_tor=False,
+            params={"deedDate": "", "offset": offset, "limit": limit},
+        )
+        if "json" not in response.headers.get("content-type", "").lower():
+            break
+        payload = response.json()
+        items.extend(payload.get("statutes", []))
+        total = payload.get("totalItems", total)
+        offset += limit
+        if total is not None and offset >= total:
+            break
+        time.sleep(0.4)
+    return items
+
+
+def _statute_pdf_urls(statute: dict) -> list[tuple[str, str]]:
+    """Extrait les (identifiant, url_pdf) d'un statut (defensif)."""
+    found: list[tuple[str, str]] = []
+    for value in statute.values():
+        if isinstance(value, str) and value.lower().endswith(".pdf"):
+            ident = re.sub(r"\W+", "_", value.rsplit("/", 1)[-1]).strip("_")
+            found.append((ident or str(len(found)), value))
+    return found
+
+
+def ingest_stapor(bce: str) -> dict[str, int]:
+    """Telecharge les statuts notaries (stapor) vers Bronze HDFS.
+
+    Sauve toujours les metadonnees JSON ; telecharge les PDF references si
+    presents. Sans cookie valide, la source est marquee en erreur sans
+    interrompre le pipeline.
+    """
+    from . import notaire_cookie
+
+    bce = normalize_bce(bce)
+    stats = {"done": 0, "skipped": 0, "error": 0, "empty": 0}
+
+    cookie = notaire_cookie.get_cookie()
+    if not cookie:
+        key = mongo_utils.file_key(bce, "stapor", "json")
+        mongo_utils.mark_pending(key, bce=bce, source="stapor", doc_type="json")
+        mongo_utils.mark_error(key, "cookie notaire indisponible")
+        stats["error"] += 1
+        print(f"[stapor] {bce} -> cookie indisponible")
+        return stats
+
+    # Delta detection sur les metadonnees JSON.
+    key = mongo_utils.file_key(bce, "stapor", "json")
+    if mongo_utils.is_done(key):
+        stats["skipped"] += 1
+    else:
+        hdfs_path = hdfs_utils.bronze_path("stapor", bce, "json", "statutes.json")
+        mongo_utils.mark_pending(key, bce=bce, source="stapor", doc_type="json", hdfs_path=hdfs_path)
+        try:
+            statutes = fetch_statutes(bce, cookie)
+            content = json.dumps(statutes, ensure_ascii=False, indent=2).encode("utf-8")
+            size = hdfs_utils.write_bytes(hdfs_path, content)
+            mongo_utils.mark_done(key, hdfs_path=hdfs_path, size_bytes=size)
+            stats["done"] += 1
+        except Exception as exc:  # noqa: BLE001
+            mongo_utils.mark_error(key, str(exc))
+            stats["error"] += 1
+            print(f"[stapor] {bce} -> erreur statuts : {exc}")
+            return stats
+
+        # PDF eventuels references dans les statuts.
+        for statute in statutes:
+            for ident, pdf_url in _statute_pdf_urls(statute):
+                status = _download_to_bronze(
+                    bce=bce, source="stapor", doc_type="pdf",
+                    filename=f"{ident}", url=urljoin("https://statuts.notaire.be/", pdf_url),
+                    deposit_id=ident, use_tor=False,
+                )
+                stats[status] = stats.get(status, 0) + 1
+                time.sleep(0.3)
+
+    print(f"[stapor] {bce} -> {stats}")
     return stats

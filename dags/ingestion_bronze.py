@@ -48,6 +48,30 @@ def ingestion_bronze():
         return numbers
 
     @task
+    def prep_tor() -> str:
+        """Verifie la sortie Tor et force une rotation d'IP."""
+        from include import config, http_client
+
+        if not config.USE_TOR:
+            print("Tor desactive.")
+            return "tor-off"
+        renewed = http_client.renew_identity()
+        try:
+            ip = http_client.public_ip(use_tor=True)
+        except Exception as exc:  # noqa: BLE001
+            ip = f"inconnue ({exc})"
+        print(f"Tor : {renewed} circuit(s) renouvele(s), IP de sortie = {ip}")
+        return "tor-ready"
+
+    @task
+    def prep_cookie() -> str:
+        """Acquiert (et met en cache HDFS) le cookie stapor/notaire."""
+        from include import notaire_cookie
+
+        cookie = notaire_cookie.get_cookie()
+        return "cookie-ok" if cookie else "cookie-absent"
+
+    @task
     def ingest_nbb(bce: str) -> dict:
         from include import sources
 
@@ -59,6 +83,12 @@ def ingestion_bronze():
 
         return sources.ingest_ejustice(bce)
 
+    @task(retries=3, retry_delay=timedelta(minutes=3))
+    def ingest_stapor(bce: str) -> dict:
+        from include import sources
+
+        return sources.ingest_stapor(bce)
+
     @task(trigger_rule="all_done")
     def report() -> dict:
         from include import mongo_utils
@@ -68,11 +98,17 @@ def ingestion_bronze():
         return summary
 
     companies = list_companies()
+    tor_ready = prep_tor()
+    cookie_ready = prep_cookie()
 
     nbb = ingest_nbb.expand(bce=companies)
     ejustice = ingest_ejustice.expand(bce=companies)
+    stapor = ingest_stapor.expand(bce=companies)
 
-    [nbb, ejustice] >> report()
+    tor_ready >> [nbb, ejustice]
+    cookie_ready >> stapor
+
+    [nbb, ejustice, stapor] >> report()
 
 
 ingestion_bronze()

@@ -33,6 +33,30 @@ BRONZE_ROOT = os.getenv("BRONZE_ROOT", "/data/raw")
 YEAR_MIN = int(os.getenv("YEAR_MIN", "2021"))
 YEAR_MAX = int(os.getenv("YEAR_MAX", "2025"))
 
+
+def _as_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_list(value: str) -> list[str]:
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+# --- Rotation Tor (anti-blocage du scraping) --------------------------------
+# Liste de proxies SOCKS5 ; les requetes tournent en round-robin dessus.
+USE_TOR = _as_bool(os.getenv("USE_TOR", "false"))
+TOR_PROXIES = _as_list(os.getenv("TOR_PROXIES", ""))
+TOR_CONTROL_HOSTS = _as_list(os.getenv("TOR_CONTROL_HOSTS", ""))
+TOR_CONTROL_PORT = int(os.getenv("TOR_CONTROL_PORT", "9051"))
+TOR_CONTROL_PASSWORD = os.getenv("TOR_CONTROL_PASSWORD", "mypass")
+
+# --- Notaire / stapor -------------------------------------------------------
+# Cookie anti-bot : fourni directement, sinon acquis via Playwright.
+COOKIE_NOTAIRE = os.getenv("COOKIE_NOTAIRE", "").strip()
+NOTAIRE_SEED_BCE = os.getenv("NOTAIRE_SEED_BCE", "0836157420")
+# Cache du cookie dans HDFS pour le partager entre les taches Airflow.
+COOKIE_HDFS_PATH = os.getenv("COOKIE_HDFS_PATH", "/data/raw/_cookies/notaire.txt")
+
 # --- Chemins locaux ---------------------------------------------------------
 # Dans le conteneur Airflow le dossier data/ est monte sur /opt/airflow/data.
 DATA_DIR = Path(os.getenv("DATA_DIR", "/opt/airflow/data"))

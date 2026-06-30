@@ -15,6 +15,14 @@ x-airflow-common: &airflow-common
     BRONZE_ROOT: /data/raw
     YEAR_MIN: '2021'
     YEAR_MAX: '2025'
+    # --- Rotation Tor (anti-blocage du scraping) ---
+    USE_TOR: 'true'
+    TOR_PROXIES: 'socks5h://tor1:9050,socks5h://tor2:9050,socks5h://tor3:9050'
+    TOR_CONTROL_HOSTS: 'tor1,tor2,tor3'
+    TOR_CONTROL_PASSWORD: 'mypass'
+    # --- Notaire / stapor ---
+    # Si un cookie valide est fourni ici, Playwright n'est pas utilise.
+    COOKIE_NOTAIRE: ''
   volumes:
     - ./dags:/opt/airflow/dags
     - ./include:/opt/airflow/include
@@ -57,6 +65,42 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+    networks: [bce_net]
+
+  # ----------------------------------------------------------------------
+  # Proxies Tor : rotation d'IP pour le scraping (NBB, eJustice, stapor)
+  # ----------------------------------------------------------------------
+  tor1:
+    image: dperson/torproxy
+    container_name: tor1
+    restart: unless-stopped
+    ports:
+      - "9050:9050"
+      - "9051:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks: [bce_net]
+
+  tor2:
+    image: dperson/torproxy
+    container_name: tor2
+    restart: unless-stopped
+    ports:
+      - "9052:9050"
+      - "9053:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks: [bce_net]
+
+  tor3:
+    image: dperson/torproxy
+    container_name: tor3
+    restart: unless-stopped
+    ports:
+      - "9054:9050"
+      - "9055:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
     networks: [bce_net]
 
   mongo-express:
