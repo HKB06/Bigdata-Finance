@@ -115,8 +115,7 @@ Services exposés :
 | Mongo Express  | http://localhost:8081   | —                |
 | Tor (SOCKS5)   | localhost:9050/9052/9054| —                |
 
-
-### 3. Exécuter les DAGs
+### 2. Exécuter les DAGs
 
 1. Déclencher **`seed_companies_mongo`** → peuple MongoDB et crée les index de
    la State DB.
@@ -126,7 +125,7 @@ Services exposés :
 Limiter le nombre d'entreprises par run via la variable `INGEST_LIMIT`
 (défaut : 10).
 
-### 4. Vérifier le résultat
+### 3. Vérifier le résultat
 
 ```bash
 # Fichiers Bronze dans HDFS
