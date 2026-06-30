@@ -115,10 +115,6 @@ Services exposés :
 | Mongo Express  | http://localhost:8081   | —                |
 | Tor (SOCKS5)   | localhost:9050/9052/9054| —                |
 
-### 2. (Optionnel) Charger l'Open Data BCE
-
-Placer `enterprise.csv` dans `data/`. Sans ce fichier, le seed bascule
-automatiquement sur un jeu de démonstration (Google / Apple / SNCB).
 
 ### 3. Exécuter les DAGs
 
