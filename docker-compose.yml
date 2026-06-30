@@ -1,0 +1,144 @@
+x-airflow-common: &airflow-common
+  build: .
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    # --- Connexions du pipeline BCE ---
+    MONGO_URI: mongodb://mongo:27017
+    MONGO_DB: bce
+    MONGO_COMPANIES: companies
+    MONGO_STATE: ingestion_state
+    HDFS_URL: http://namenode:9870
+    HDFS_USER: root
+    BRONZE_ROOT: /data/raw
+    YEAR_MIN: '2021'
+    YEAR_MAX: '2025'
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./include:/opt/airflow/include
+    - ./logs:/opt/airflow/logs
+    - ./data:/opt/airflow/data
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    mongo:
+      condition: service_started
+  networks:
+    - bce_net
+
+services:
+  # ----------------------------------------------------------------------
+  # Metastore Airflow
+  # ----------------------------------------------------------------------
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    networks: [bce_net]
+
+  # ----------------------------------------------------------------------
+  # MongoDB : referentiel des entreprises + State DB (meta DB)
+  # ----------------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks: [bce_net]
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: mongo-express
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017
+      ME_CONFIG_BASICAUTH: 'false'
+    ports:
+      - "8081:8081"
+    depends_on: [mongo]
+    networks: [bce_net]
+
+  # ----------------------------------------------------------------------
+  # HDFS (Bronze data lake)
+  # ----------------------------------------------------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=bce
+    env_file: [./hadoop.env]
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+    networks: [bce_net]
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870
+    env_file: [./hadoop.env]
+    ports:
+      - "9864:9864"
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    depends_on: [namenode]
+    networks: [bce_net]
+
+  # ----------------------------------------------------------------------
+  # Airflow
+  # ----------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username airflow --password airflow \
+          --firstname a --lastname b --role Admin --email admin@bce.local || true
+    depends_on:
+      <<: *airflow-common-depends-on
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports: ["8080:8080"]
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db:
+  mongo-data:
+  hdfs-namenode:
+  hdfs-datanode:
+
+networks:
+  bce_net:
+    driver: bridge

@@ -1,0 +1,23 @@
+# Donnees locales (Open Data BCE/KBO, fichiers volumineux)
+data/*.csv
+data/landing/
+data/raw/
+
+# Logs Airflow
+logs/
+
+# Environnement
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

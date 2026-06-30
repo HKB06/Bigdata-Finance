@@ -1,0 +1,6 @@
+# Placer ici enterprise.csv (Open Data BCE/KBO) pour peupler MongoDB avec
+# l'ensemble des entreprises belges. Sans ce fichier, le seed utilise un
+# jeu de demonstration (Google / Apple / SNCB).
+#
+# Telechargement : https://kbopub.economie.fgov.be/kbo-open-data/
+# Les fichiers .csv de ce dossier ne sont pas versionnes (cf. .gitignore).
