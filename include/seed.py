@@ -9,14 +9,24 @@ reste executable pour le rendu.
 from __future__ import annotations
 
 import csv
+import os
 import re
+from datetime import datetime, timezone
 from typing import Iterator, Optional
+
+from pymongo import UpdateOne
 
 from . import config
 from . import mongo_utils
 
-# enterprise.csv peut etre volumineux (~2M lignes) : on borne le seed par defaut.
-DEFAULT_SEED_LIMIT = 200
+# Par defaut on charge TOUT enterprise.csv dans MongoDB (~2M entreprises),
+# comme attendu pour le referentiel. Mettre une valeur entiere (ex. 200) ou
+# la variable SEED_LIMIT pour borner le chargement lors de tests.
+_env_limit = os.getenv("SEED_LIMIT", "").strip()
+DEFAULT_SEED_LIMIT: Optional[int] = int(_env_limit) if _env_limit.isdigit() else None
+
+# Taille des lots pour l'insertion en masse dans MongoDB.
+BATCH_SIZE = 5000
 
 
 def normalize_bce(value: str) -> str:
@@ -47,19 +57,46 @@ def _extract_number(row: dict) -> Optional[str]:
     return None
 
 
+def _flush(collection, operations: list) -> None:
+    if operations:
+        collection.bulk_write(operations, ordered=False)
+
+
 def seed_companies(limit: Optional[int] = DEFAULT_SEED_LIMIT) -> int:
-    """Charge les entreprises dans MongoDB. Renvoie le nombre insere/maj."""
+    """Charge les entreprises dans MongoDB (insertion en masse par lots).
+
+    Renvoie le nombre de lignes traitees.
+    """
     mongo_utils.ensure_indexes()
+    collection = mongo_utils.companies_collection()
 
     count = 0
     if config.ENTERPRISE_CSV.exists():
-        print(f"Seed depuis {config.ENTERPRISE_CSV} (limite={limit})")
+        label = "tout" if limit is None else f"limite={limit}"
+        print(f"Seed depuis {config.ENTERPRISE_CSV} ({label}), par lots de {BATCH_SIZE}...")
+
+        operations: list[UpdateOne] = []
         for row in _read_csv_rows(limit):
             bce = _extract_number(row)
             if not bce:
                 continue
-            mongo_utils.upsert_company(bce=bce, source="kbo_open_data")
+            now = datetime.now(timezone.utc)
+            operations.append(
+                UpdateOne(
+                    {"bce": bce},
+                    {
+                        "$set": {"bce": bce, "source": "kbo_open_data", "updated_at": now},
+                        "$setOnInsert": {"created_at": now},
+                    },
+                    upsert=True,
+                )
+            )
             count += 1
+            if len(operations) >= BATCH_SIZE:
+                _flush(collection, operations)
+                operations = []
+                print(f"  ... {count:,} entreprises chargees")
+        _flush(collection, operations)
     else:
         print(
             f"{config.ENTERPRISE_CSV} introuvable -> jeu de demonstration "
@@ -70,7 +107,7 @@ def seed_companies(limit: Optional[int] = DEFAULT_SEED_LIMIT) -> int:
             count += 1
 
     total = mongo_utils.count_companies()
-    print(f"Seed termine : {count} entreprises traitees, {total} au total dans MongoDB.")
+    print(f"Seed termine : {count:,} entreprises traitees, {total:,} au total dans MongoDB.")
     return count
 
 
