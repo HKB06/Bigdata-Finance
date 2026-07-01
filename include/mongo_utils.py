@@ -58,6 +58,21 @@ def state_collection() -> Collection:
     return get_client()[config.MONGO_DB][config.MONGO_STATE]
 
 
+def finale_collection() -> Collection:
+    """Collection Bronze consolidee (un document riche par entreprise)."""
+    return get_client()[config.MONGO_DB][config.MONGO_FINALE]
+
+
+def silver_collection() -> Collection:
+    """Collection Silver (documents nettoyes / enrichis)."""
+    return get_client()[config.MONGO_DB][config.MONGO_SILVER]
+
+
+def hotel_state_collection() -> Collection:
+    """State DB du scraping hotellerie (un document par entreprise cible)."""
+    return get_client()[config.MONGO_DB][config.MONGO_HOTEL_STATE]
+
+
 def ensure_indexes() -> None:
     """Initialise la State DB et le referentiel (index)."""
     companies = companies_collection()
@@ -175,3 +190,64 @@ def state_summary() -> dict[str, int]:
     """Renvoie le nombre de fichiers par statut (pour le monitoring)."""
     pipeline = [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
     return {row["_id"]: row["n"] for row in state_collection().aggregate(pipeline)}
+
+
+# --------------------------------------------------------------------------
+# Jour 2 : State DB hotellerie (suivi au niveau entreprise)
+# --------------------------------------------------------------------------
+def ensure_hotel_indexes() -> None:
+    coll = hotel_state_collection()
+    coll.create_index([("bce", ASCENDING)], unique=True)
+    coll.create_index([("status", ASCENDING)])
+
+
+def hotel_upsert_pending(bce: str, name: Optional[str] = None) -> None:
+    """Charge une entreprise hoteliere en State DB avec status=pending."""
+    hotel_state_collection().update_one(
+        {"bce": bce},
+        {
+            "$setOnInsert": {
+                "bce": bce,
+                "name": name,
+                "status": "pending",
+                "filings_count": 0,
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+        },
+        upsert=True,
+    )
+
+
+def hotel_is_done(bce: str) -> bool:
+    doc = hotel_state_collection().find_one({"bce": bce}, {"status": 1})
+    return bool(doc and doc.get("status") == "done")
+
+
+def hotel_set_status(
+    bce: str,
+    status: str,
+    filings_count: Optional[int] = None,
+    error: Optional[str] = None,
+) -> None:
+    update = {"status": status, "updated_at": _now()}
+    if filings_count is not None:
+        update["filings_count"] = filings_count
+    if error is not None:
+        update["error"] = str(error)[:2000]
+    hotel_state_collection().update_one({"bce": bce}, {"$set": update})
+
+
+def hotel_pending_bce(limit: Optional[int] = None) -> list[str]:
+    """Liste les entreprises hotelieres restant a scraper (pending/error)."""
+    cursor = hotel_state_collection().find(
+        {"status": {"$in": ["pending", "error"]}}, {"bce": 1, "_id": 0}
+    ).sort("bce", ASCENDING)
+    if limit:
+        cursor = cursor.limit(limit)
+    return [doc["bce"] for doc in cursor]
+
+
+def hotel_summary() -> dict[str, int]:
+    pipeline = [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+    return {row["_id"]: row["n"] for row in hotel_state_collection().aggregate(pipeline)}

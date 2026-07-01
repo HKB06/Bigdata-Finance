@@ -75,17 +75,21 @@ Clé déterministe d'un fichier : `bce | source | deposit_id | doc_type | year`.
 ├── requirements.txt          # dependances pour execution locale
 ├── .env.example              # variables d'environnement
 ├── dags/
-│   ├── seed_companies_mongo.py  # init : peuple MongoDB + State DB
-│   └── ingestion_bronze.py      # ingestion NBB + eJustice + stapor -> HDFS
+│   ├── seed_companies_mongo.py    # init : peuple MongoDB + State DB
+│   ├── ingestion_bronze.py        # Jour 1 : NBB + eJustice + stapor -> HDFS
+│   └── jour2_silver_hotellerie.py # Jour 2 : finale -> silver -> scraping hotels
 ├── include/
-│   ├── config.py             # configuration centrale
-│   ├── mongo_utils.py        # referentiel + State DB (delta detection)
-│   ├── hdfs_utils.py         # client WebHDFS + ecriture Bronze
-│   ├── http_client.py        # GET avec rotation Tor (round-robin + NEWNYM)
-│   ├── notaire_cookie.py     # cookie stapor via Playwright + cache HDFS
-│   ├── seed.py               # chargement des entreprises dans MongoDB
-│   └── sources.py            # ingestion NBB / eJustice / stapor
-└── data/                     # enterprise.csv (non versionne)
+│   ├── config.py                  # configuration centrale
+│   ├── mongo_utils.py             # referentiel + State DB (delta detection)
+│   ├── hdfs_utils.py              # client WebHDFS + ecriture Bronze
+│   ├── http_client.py             # GET avec rotation Tor (round-robin + NEWNYM)
+│   ├── notaire_cookie.py          # cookie stapor via Playwright + cache HDFS
+│   ├── seed.py                    # chargement des entreprises dans MongoDB
+│   ├── sources.py                 # ingestion NBB / eJustice / stapor
+│   ├── build_enterprise_finale.py # Jour 2 : fusion des 5 CSV KBO -> Bronze consolide
+│   ├── silver.py                  # Jour 2 : transformation Bronze -> Silver
+│   └── hotel.py                   # Jour 2 : filtre hotellerie + scraping NBB
+└── data/                          # CSV KBO (non versionnes)
 ```
 
 ## Sources de données
@@ -142,8 +146,53 @@ Relancer `ingestion_bronze` une seconde fois : tous les fichiers déjà chargés
 passent en `skipped` (aucun nouveau téléchargement), ce qui démontre que la
 State DB empêche les re-téléchargements.
 
+## Jour 2 — Couche Silver & ciblage hôtellerie
+
+Le Jour 2 consolide les données brutes puis cible le **secteur hôtelier** pour
+en scraper les comptes annuels NBB (exercices ≥ 2021).
+
+```
+enterprise_finale  ──►  enterprise_silver  ──►  filtre hôtellerie  ──►  hotel_state
+   (Bronze fusion)         (nettoyé/enrichi)      (NACE 55xxx…)          (State DB)
+   5 CSV KBO                                                                  │
+                                                                             ▼
+                                                             scraping NBB CSV (≥2021)
+                                                                  → HDFS Bronze
+```
+
+**Collections MongoDB créées :**
+
+| Collection          | Rôle                                                        |
+|---------------------|------------------------------------------------------------|
+| `enterprise_finale` | Bronze consolidé : 1 doc riche/entreprise (fusion 5 CSV)    |
+| `enterprise_silver` | Silver : dates normalisées, activités dédupliquées, labels  |
+| `hotel_state`       | State DB hôtellerie (1 doc/hôtel : status, filings_count)   |
+
+**Étapes de transformation Silver** (`include/silver.py`) :
+1. `StartDate` `DD-MM-YYYY` → `YYYY-MM-DD` ;
+2. déduplication des activités (même NaceCode + Classification) ;
+3. adresse unique : on ne garde que le siège `REGO` ;
+4. dénomination officielle (`TypeOfDenomination = 1`) placée en premier ;
+5. décodage des codes → libellés FR (`code.csv`).
+
+**Ciblage hôtellerie** (`include/hotel.py`) : `Status = AC`, `TypeOfEnterprise = 2`,
+activité **MAIN** avec un code NACE hôtelier (`55100`, `55201…55900`), formes
+juridiques publiques exclues.
+
+**Données** : si les 5 CSV KBO (`enterprise`, `denomination`, `address`,
+`activity`, `code`) sont présents dans `data/`, ils sont fusionnés (borne
+`SEED_LIMIT`). Sinon, un **jeu de démonstration** est chargé : 4 vrais hôtels
+belges (avec comptes annuels NBB) + entreprises non hôtelières, ce qui rend
+toute la chaîne démontrable sans le gros téléchargement.
+
+**Exécuter le Jour 2 :** déclencher le DAG **`jour2_silver_hotellerie`**.
+Bornes optionnelles : `SEED_LIMIT` (chargement `enterprise_finale`) et
+`HOTEL_LIMIT` (nombre d'hôtels scrapés). Le 429 (rate limit NBB) fait passer
+l'hôtel en `error` : il est repris au run suivant via la State DB.
+
 ## Workflow Git
 
 - Le travail de chaque journée est livré sur une branche dédiée.
-- Cette journée : branche **`INGESTION-BRONZE`**.
+- Jour 1 : branche **`INGESTION-BRONZE`**.
+- Jour 2 : branche **`JOUR2`**.
 - La branche **`main`** ne contient que la dernière version fonctionnelle.

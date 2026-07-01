@@ -24,6 +24,11 @@ MONGO_DB = os.getenv("MONGO_DB", "bce")
 MONGO_COMPANIES = os.getenv("MONGO_COMPANIES", "companies")
 MONGO_STATE = os.getenv("MONGO_STATE", "ingestion_state")
 
+# --- Jour 2 : collections Bronze consolide, Silver et State DB hotellerie ----
+MONGO_FINALE = os.getenv("MONGO_FINALE", "enterprise_finale")
+MONGO_SILVER = os.getenv("MONGO_SILVER", "enterprise_silver")
+MONGO_HOTEL_STATE = os.getenv("MONGO_HOTEL_STATE", "hotel_state")
+
 # --- HDFS (Bronze data lake) ------------------------------------------------
 HDFS_URL = os.getenv("HDFS_URL", "http://localhost:9870")
 HDFS_USER = os.getenv("HDFS_USER", "root")
@@ -61,6 +66,49 @@ COOKIE_HDFS_PATH = os.getenv("COOKIE_HDFS_PATH", "/data/raw/_cookies/notaire.txt
 # Dans le conteneur Airflow le dossier data/ est monte sur /opt/airflow/data.
 DATA_DIR = Path(os.getenv("DATA_DIR", "/opt/airflow/data"))
 ENTERPRISE_CSV = DATA_DIR / "enterprise.csv"
+
+# --- Fichiers Open Data KBO utilises pour construire enterprise_finale -------
+KBO_FILES = {
+    "enterprise": DATA_DIR / "enterprise.csv",
+    "denomination": DATA_DIR / "denomination.csv",
+    "address": DATA_DIR / "address.csv",
+    "activity": DATA_DIR / "activity.csv",
+    "code": DATA_DIR / "code.csv",
+}
+
+# --- Jour 2 : ciblage hotellerie --------------------------------------------
+# Codes NACE retenus pour le secteur hotelier (Nace2008 + Nace2025).
+HOTEL_NACE_CODES = {
+    "55100",  # Hotels et hebergement similaire
+    "55201",  # Auberges de jeunesse
+    "55202",  # Centres et villages de vacances
+    "55203",  # Gites, appartements et meubles de vacances
+    "55204",  # Chambres d'hotes
+    "55209",  # Autres hebergements de courte duree n.c.a.
+    "55300",  # Terrains de camping et parcs pour caravanes
+    "55400",  # Intermediation pour l'hebergement (Airbnb/Booking)
+    "55900",  # Autres hebergements
+}
+
+# Formes juridiques exclues (entites publiques, services, communes...).
+EXCLUDED_JURIDICAL_FORMS = {
+    "110", "114", "116", "117",
+    "301", "302", "303",
+    "310", "320", "330", "340", "350",
+    "400", "411", "412", "413", "414", "415", "416", "417", "418", "419", "420",
+}
+
+# Fenetre d'exercices scrapes pour l'hotellerie.
+HOTEL_YEAR_MIN = int(os.getenv("HOTEL_YEAR_MIN", "2021"))
+
+# Vrais hotels belges (avec comptes annuels NBB) utilises comme jeu de
+# demonstration quand les CSV KBO ne sont pas presents dans data/.
+DEMO_HOTELS = [
+    {"bce": "0533820890", "name": "SOCIETE HOTELIERE DE BRUXELLES ET DU NORD"},
+    {"bce": "0448410115", "name": "HOTEL VAN BELLE"},
+    {"bce": "0711984948", "name": "A&O HOSTEL AND HOTEL BRUXELLES"},
+    {"bce": "0421169149", "name": "ATLAS HOTEL BRUSSELS"},
+]
 
 # Jeu de demonstration utilise quand aucun CSV KBO n'est present.
 # (Google Belgium, Apple Retail Belgium, SNCB).
