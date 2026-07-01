@@ -204,6 +204,10 @@ Exécution complète sur le jeu de données KBO réel.
 | `hotel_state`       | 4 918       | hôtels ciblés — **4 486 `done`**         |
 | `ingestion_state`   | 14 416      | State DB fichiers (delta detection)      |
 
+**Airflow (http://localhost:8080)** — DAGs du pipeline :
+
+![Airflow — DAGs](docs/screenshots/airflow-dags.png)
+
 **HDFS Bronze :** ~14 000 fichiers CSV de comptes annuels NBB écrits dans
 `/data/raw/nbb/{bce}/csv/{year}.csv` (13 985 blocs, DataNode `In service`).
 
