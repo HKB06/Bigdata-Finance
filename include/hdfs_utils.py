@@ -13,20 +13,22 @@ Exemple :
 
 from __future__ import annotations
 
-from typing import Optional
+import threading
 
 from hdfs import InsecureClient
 
 from . import config
 
-_hdfs: Optional[InsecureClient] = None
+# Un client HDFS par thread (le scraping hotellerie ecrit en parallele).
+_local = threading.local()
 
 
 def get_hdfs() -> InsecureClient:
-    global _hdfs
-    if _hdfs is None:
-        _hdfs = InsecureClient(config.HDFS_URL, user=config.HDFS_USER)
-    return _hdfs
+    client = getattr(_local, "client", None)
+    if client is None:
+        client = InsecureClient(config.HDFS_URL, user=config.HDFS_USER)
+        _local.client = client
+    return client
 
 
 def bronze_path(source: str, bce: str, doc_type: str, filename: str) -> str:

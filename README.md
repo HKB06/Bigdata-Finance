@@ -190,6 +190,33 @@ Bornes optionnelles : `SEED_LIMIT` (chargement `enterprise_finale`) et
 `HOTEL_LIMIT` (nombre d'hôtels scrapés). Le 429 (rate limit NBB) fait passer
 l'hôtel en `error` : il est repris au run suivant via la State DB.
 
+## Résultats (preuves d'exécution)
+
+Exécution complète sur le jeu de données KBO réel.
+
+**MongoDB (base `bce`) :**
+
+| Collection          | Documents   | Détail                                   |
+|---------------------|-------------|------------------------------------------|
+| `companies`         | 1 954 629   | référentiel BCE (seed complet)           |
+| `enterprise_finale` | 1 954 629   | Bronze consolidé (fusion des 5 CSV KBO)  |
+| `enterprise_silver` | 1 954 629   | Silver (dates, dédup, REGO, labels)      |
+| `hotel_state`       | 4 918       | hôtels ciblés — **4 486 `done`**         |
+| `ingestion_state`   | 14 416      | State DB fichiers (delta detection)      |
+
+**HDFS Bronze :** ~14 000 fichiers CSV de comptes annuels NBB écrits dans
+`/data/raw/nbb/{bce}/csv/{year}.csv` (13 985 blocs, DataNode `In service`).
+
+Interface web du NameNode (http://localhost:9870) :
+
+![HDFS — Overview](docs/screenshots/hdfs-overview.png)
+
+![HDFS — Summary](docs/screenshots/hdfs-summary.png)
+
+![HDFS — DataNodes](docs/screenshots/hdfs-datanodes.png)
+
+![HDFS — NameNode Journal](docs/screenshots/hdfs-namenode.png)
+
 ## Workflow Git
 
 - Le travail de chaque journée est livré sur une branche dédiée.

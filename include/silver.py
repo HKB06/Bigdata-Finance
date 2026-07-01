@@ -1,14 +1,7 @@
-"""Couche Silver : transformation de `enterprise_finale` vers `enterprise_silver`.
+"""Couche Silver : enterprise_finale (Bronze, intacte) -> enterprise_silver.
 
-On ne modifie jamais enterprise_finale (couche Bronze). On construit une
-nouvelle collection nettoyee :
-
-1. StartDate DD-MM-YYYY -> YYYY-MM-DD (comparaisons de dates possibles) ;
-2. deduplication des activites (meme NaceCode exact + meme Classification) ;
-3. adresse unique : on ne garde que TypeOfAddress = REGO ;
-4. denomination principale (TypeOfDenomination = 1) placee en premier ;
-5. decodage des codes -> labels FR via code.csv
-   (JuridicalFormLabel, StatusLabel, activities[].NaceLabel).
+Etapes : dates normalisees, activites dedupliquees, adresse REGO unique,
+denomination officielle en premier, et labels FR ajoutes via code.csv.
 """
 
 from __future__ import annotations
@@ -26,9 +19,6 @@ from . import mongo_utils
 BATCH_SIZE = 2000
 
 
-# --------------------------------------------------------------------------
-# Table de decodage des codes (code.csv)
-# --------------------------------------------------------------------------
 def load_code_labels(language: str = "FR") -> dict[tuple[str, str], str]:
     """Charge {(Category, Code): Description} pour une langue donnee."""
     path = config.KBO_FILES["code"]
@@ -43,9 +33,6 @@ def load_code_labels(language: str = "FR") -> dict[tuple[str, str], str]:
     return labels
 
 
-# --------------------------------------------------------------------------
-# Transformations unitaires
-# --------------------------------------------------------------------------
 def normalize_date(value: Optional[str]) -> Optional[str]:
     """DD-MM-YYYY -> YYYY-MM-DD (renvoie la valeur telle quelle si illisible)."""
     if not value:
@@ -75,11 +62,16 @@ def keep_rego_address(addresses: list[dict]) -> list[dict]:
     return [a for a in (addresses or []) if a.get("TypeOfAddress") == "REGO"]
 
 
+def is_official_denomination(type_code) -> bool:
+    """Vrai pour la denomination officielle (code KBO zero-padde : "001")."""
+    return str(type_code or "").lstrip("0") == "1"
+
+
 def order_denominations(denominations: list[dict]) -> list[dict]:
-    """Place la denomination officielle (TypeOfDenomination = 1) en premier."""
+    """Place la denomination officielle (TypeOfDenomination = 001) en premier."""
     return sorted(
         denominations or [],
-        key=lambda d: 0 if str(d.get("TypeOfDenomination")) == "1" else 1,
+        key=lambda d: 0 if is_official_denomination(d.get("TypeOfDenomination")) else 1,
     )
 
 

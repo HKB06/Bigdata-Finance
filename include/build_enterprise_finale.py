@@ -1,25 +1,8 @@
-"""Construction de la collection Bronze consolidee `enterprise_finale`.
+"""Construit la collection Bronze enterprise_finale a partir des 5 CSV KBO.
 
-Fusionne les 5 fichiers Open Data KBO en un document riche par entreprise :
-
-    {
-        "_id": "0533820890",
-        "EnterpriseNumber": "0533820890",
-        "Status": "AC",
-        "JuridicalSituation": "000",
-        "TypeOfEnterprise": "2",
-        "JuridicalForm": "610",
-        "StartDate": "02-01-2021",
-        "denominations": [{"Language": "2", "TypeOfDenomination": "1", "Denomination": "..."}],
-        "addresses":     [{"TypeOfAddress": "REGO", "Zipcode": "1020", ...}],
-        "activities":    [{"NaceVersion": "2008", "NaceCode": "55100", "Classification": "MAIN"}],
-    }
-
-Sans les CSV dans data/, on charge un jeu de demonstration compose de vrais
-hotels belges (DEMO_HOTELS) + des entreprises non hotelieres, afin que le
-Silver et le filtre hotellerie restent demontrables.
-
-La variable SEED_LIMIT borne le nombre d'entreprises chargees (tests).
+Un document par entreprise, avec ses denominations, adresses et activites.
+Si les CSV ne sont pas dans data/, on charge un petit jeu de demo.
+SEED_LIMIT permet de limiter le nombre d'entreprises (tests).
 """
 
 from __future__ import annotations
@@ -53,19 +36,22 @@ def _all_kbo_files_present() -> bool:
     return all(path.exists() for path in config.KBO_FILES.values())
 
 
-# --------------------------------------------------------------------------
-# Construction depuis les CSV KBO
-# --------------------------------------------------------------------------
-def _build_from_csv(limit: Optional[int]) -> int:
-    # 1. Entreprises cibles (limitees) -> document de base.
-    docs: dict[str, dict] = {}
-    for i, row in enumerate(_dict_rows(config.KBO_FILES["enterprise"])):
-        if limit and i >= limit:
+# Les CSV pesent plusieurs Go : on lit en streaming et on ecrit par lots.
+def _load_enterprises(limit: Optional[int]) -> tuple[int, Optional[set]]:
+    """Cree un document de base par entreprise (listes vides)."""
+    collection = mongo_utils.finale_collection()
+    now = datetime.now(timezone.utc)
+    targets: Optional[set] = set() if limit is not None else None
+
+    ops: list[UpdateOne] = []
+    count = 0
+    for row in _dict_rows(config.KBO_FILES["enterprise"]):
+        if limit is not None and count >= limit:
             break
         bce = normalize_bce(row.get("EnterpriseNumber"))
         if not bce:
             continue
-        docs[bce] = {
+        doc = {
             "_id": bce,
             "EnterpriseNumber": bce,
             "Status": row.get("Status"),
@@ -76,56 +62,76 @@ def _build_from_csv(limit: Optional[int]) -> int:
             "denominations": [],
             "addresses": [],
             "activities": [],
+            "built_at": now,
         }
-    targets = set(docs)
-    print(f"  entreprises retenues : {len(targets):,}")
-
-    # 2. Sous-fichiers : on ne garde que les lignes des entreprises cibles.
-    def attach(file_key: str, dest: str, fields: list[str]) -> None:
-        path = config.KBO_FILES[file_key]
-        kept = 0
-        for row in _dict_rows(path):
-            bce = normalize_bce(row.get("EntityNumber"))
-            doc = docs.get(bce)
-            if doc is None:
-                continue
-            doc[dest].append({field: row.get(field) for field in fields})
-            kept += 1
-        print(f"  {file_key}: {kept:,} lignes rattachees")
-
-    attach("denomination", "denominations", ["Language", "TypeOfDenomination", "Denomination"])
-    attach("address", "addresses", [
-        "TypeOfAddress", "CountryFR", "Zipcode", "MunicipalityFR",
-        "StreetFR", "HouseNumber", "Box", "DateStrikingOff",
-    ])
-    attach("activity", "activities", ["ActivityGroup", "NaceVersion", "NaceCode", "Classification"])
-
-    # 3. Insertion en masse.
-    collection = mongo_utils.finale_collection()
-    ops: list[UpdateOne] = []
-    now = datetime.now(timezone.utc)
-    count = 0
-    for doc in docs.values():
-        doc["built_at"] = now
-        ops.append(UpdateOne({"_id": doc["_id"]}, {"$set": doc}, upsert=True))
+        ops.append(UpdateOne({"_id": bce}, {"$set": doc}, upsert=True))
+        if targets is not None:
+            targets.add(bce)
         count += 1
         if len(ops) >= BATCH_SIZE:
             collection.bulk_write(ops, ordered=False)
             ops = []
     if ops:
         collection.bulk_write(ops, ordered=False)
+    print(f"  enterprise.csv : {count:,} entreprises chargees")
+    return count, targets
+
+
+def _iter_grouped(path, key_field: str):
+    """Regroupe les lignes qui se suivent et ont le meme numero d'entite."""
+    current: Optional[str] = None
+    bucket: list[dict] = []
+    for row in _dict_rows(path):
+        key = normalize_bce(row.get(key_field))
+        if key != current:
+            if current and bucket:
+                yield current, bucket
+            current, bucket = key, []
+        bucket.append(row)
+    if current and bucket:
+        yield current, bucket
+
+
+def _attach(file_key: str, dest: str, fields: list[str], targets: Optional[set]) -> None:
+    """Ajoute les lignes d'un sous-fichier dans le document de l'entreprise."""
+    collection = mongo_utils.finale_collection()
+    ops: list[UpdateOne] = []
+    groups = 0
+    for bce, rows in _iter_grouped(config.KBO_FILES[file_key], "EntityNumber"):
+        if not bce:
+            continue
+        if targets is not None and bce not in targets:
+            continue
+        payload = [{f: r.get(f) for f in fields} for r in rows]
+        # upsert=False : on ignore les etablissements sans entreprise.
+        ops.append(UpdateOne({"_id": bce}, {"$push": {dest: {"$each": payload}}}, upsert=False))
+        groups += 1
+        if len(ops) >= BATCH_SIZE:
+            collection.bulk_write(ops, ordered=False)
+            ops = []
+    if ops:
+        collection.bulk_write(ops, ordered=False)
+    print(f"  {file_key} : {groups:,} entites rattachees ({dest})")
+
+
+def _build_from_csv(limit: Optional[int]) -> int:
+    count, targets = _load_enterprises(limit)
+    _attach("denomination", "denominations",
+            ["Language", "TypeOfDenomination", "Denomination"], targets)
+    _attach("address", "addresses",
+            ["TypeOfAddress", "CountryFR", "Zipcode", "MunicipalityFR",
+             "StreetFR", "HouseNumber", "Box", "DateStrikingOff"], targets)
+    _attach("activity", "activities",
+            ["ActivityGroup", "NaceVersion", "NaceCode", "Classification"], targets)
     return count
 
 
-# --------------------------------------------------------------------------
-# Jeu de demonstration (vrais hotels + entreprises non hotelieres)
-# --------------------------------------------------------------------------
+# Jeu de demo si les CSV KBO sont absents.
 def _demo_document(bce: str, name: str, nace: Optional[str]) -> dict:
     activities = []
     if nace:
         activities = [
             {"ActivityGroup": "001", "NaceVersion": "2008", "NaceCode": nace, "Classification": "MAIN"},
-            # doublon exact (pour illustrer la deduplication Silver)
             {"ActivityGroup": "001", "NaceVersion": "2008", "NaceCode": nace, "Classification": "MAIN"},
         ]
     return {
@@ -158,7 +164,6 @@ def _build_demo() -> int:
     docs = []
     for hotel in config.DEMO_HOTELS:
         docs.append(_demo_document(hotel["bce"], hotel["name"], nace="55100"))
-    # Quelques entreprises non hotelieres (pour la demo Silver, pas de scraping).
     for company in config.DEMO_COMPANIES:
         docs.append(_demo_document(company["bce"], company["name"], nace="70100"))
 
@@ -175,10 +180,7 @@ def build_enterprise_finale(limit: Optional[int] = DEFAULT_LIMIT) -> int:
         count = _build_from_csv(limit)
     else:
         missing = [k for k, p in config.KBO_FILES.items() if not p.exists()]
-        print(
-            f"CSV KBO manquants ({', '.join(missing)}) -> jeu de demonstration "
-            f"(hotels reels + entreprises non hotelieres)."
-        )
+        print(f"CSV KBO manquants ({', '.join(missing)}) -> jeu de demonstration.")
         count = _build_demo()
 
     total = mongo_utils.finale_collection().count_documents({})
